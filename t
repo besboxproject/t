@@ -7,6 +7,8 @@
 # TODO make this optional
 T_NEWSYNC=1
 
+# TODO put as optional in sync config
+# if T_SYNCALL is non-zero string then show all lines during sync else just show lines that are different (default)
 
 # TODO now need a function to handle line and properties as its getting complicated :-)
 
@@ -46,6 +48,40 @@ echo $$ >$LOCKFILE
 }
 
 
+function activity {
+	# display an activity indicator (used for sync)
+
+	if [[ -z "$pACTIVITY_INDc" ]] ; then
+		pACTIVITY_INDc=0
+	fi
+		
+	pACTIVITY_INDc=$((pACTIVITY_INDc+1))
+	if [[ $pACTIVITY_INDc -eq 8 ]] ; then
+		pACTIVITY_INDc=0
+	fi
+
+	if [[ $pACTIVITY_INDc -eq 0 ]] ; then
+		pACTIVITY_IND="|"
+	elif [[ $pACTIVITY_INDc -eq 1 ]] ; then
+		pACTIVITY_IND="/"
+	elif [[ $pACTIVITY_INDc -eq 2 ]] ; then
+		pACTIVITY_IND="-"
+	elif [[ $pACTIVITY_INDc -eq 3 ]] ; then
+		pACTIVITY_IND="\\"
+	elif [[ $pACTIVITY_INDc -eq 4 ]] ; then
+		pACTIVITY_IND="|"
+	elif [[ $pACTIVITY_INDc -eq 5 ]] ; then
+		pACTIVITY_IND="/"
+	elif [[ $pACTIVITY_INDc -eq 6 ]] ; then
+		pACTIVITY_IND="-"
+	elif [[ $pACTIVITY_INDc -eq 7 ]] ; then
+		pACTIVITY_IND="\\"
+	fi
+
+	
+	printf "\r%s" "$pACTIVITY_IND" 
+}
+
 
 # line format
 #
@@ -74,9 +110,15 @@ P_SYNCID=18
 P_SYNCLAST=19
 P_SOURCEID=20
 P_SEQ=21
-
+P_REPEAT=22
+P_NOTIFY=23
+P_IMAGES=24
+# repeat datum is from due date or completed date
+P_RTYPE=25
+# Task Type WF
+P_TTYPE=26
 # Max count of columns to check
-P_MAXCOL=25
+P_MAXCOL=30
 
 CAN_SYNC=1
 
@@ -100,6 +142,9 @@ for el in $( seq 1 ${P_MAXCOL}) ; do
 		fi
 		if [[ $el -eq $P_SEQ ]] ; then
 			PROPS[$el]=" 100 "
+		fi
+		if [[ $el -eq $P_REPEAT ]] ; then
+			PROPS[$el]=" 0 "
 		fi
 	fi
 done
@@ -205,6 +250,10 @@ function syncupload {
 				PROGRESS="--> ${PROGRESS}"
 			curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X POST $T_SYNCSERVER/api/v1/  >${TDF}.json 2>/dev/null
 
+# TODO handle server error returning "<h1>Server Error (500)</h1>"
+#sleep 2
+#cp -v ${TDF}.json $(date +%s%).json
+
 			# get id to update the line with
 			PROPS[$P_SYNCID]=$(jq .id <${TDF}.json)
 			PROPS[$P_SYNCLAST]=$(date +%s)
@@ -279,14 +328,36 @@ if [[ -n "$T_NEWSYNC" ]]; then
 	# get the full list of items
 	echo "Download task list..."
 	curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/ 2>/dev/null >${TDF}.full
+
+        if [[ ! -s ${TDF}.full ]] ; then
+		echo "Server has no data. Were you expect this? Ctrl-C if not or press enter if OK"
+		read A
+		sleep 30
+		echo "Starting sync...."
+	fi
 fi
 
+echo "Scanning tasks..."
+
+# record time we started sync (for flagging if a line changes)
+
+grep T_SYNCLAST "${TDFS}" >/dev/null 2>&1
+if [[ $? -eq 0 ]] ; then
+	sed -i "s/^T_SYNCLAST=.*/T_SYNCLAST=${NOW}/" "$TDFS"
+else
+	echo "T_SYNCLAST=${NOW}" >>"$TDFS"
+fi
+
+SYNC_UP=0
+SYNC_DOWN=0
+SYNC_UN=0
 
 
 echo >${TDF}.wi
 echo >${TDF}.seen
 cat "$TDF" | ( SEQ=100; C=1; 
 	while read l ; do
+		activity
 		# get all the properties
 
 		P_ARRAY=${l#*|}
@@ -308,6 +379,8 @@ cat "$TDF" | ( SEQ=100; C=1;
 			fi
 #echo "seq /${PROPS[$P_SEQ]}/"
 		# build start of progess line
+
+
 		PROGRESS=": ${LINE}"
 
 
@@ -342,7 +415,12 @@ else
 if [[ -n "$T_NEWSYNC" ]]; then
 	#echo "Get task from download ${SID}"
 	# look up id in fullv2 and create RES var
-	RES=$(jq -c ".[] | select(.id == ${SID})" ${TDF}.full)
+        if [[ -z "${SID}" ]] ; then
+             SID=0
+        fi
+
+	RES=$(jq -c ".[] | select(.id == ${SID})" ${TDF}.full 2>/dev/null)
+	#echo $RES
 else
 		# look up task by id
 		RES=$(curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/${SID}/ 2>/dev/null) 
@@ -352,10 +430,14 @@ fi
 		# check for look up failure
 		FAILL=0
 
+
 		if [[ "$RES" = "{\"detail\":\"Not found.\"}" ]] ; then
 			FAILL=1
 		fi
 		if [[ -z "$RES" ]] ; then
+			FAILL=1
+		fi
+		if [[ $SID -eq 0 ]] ; then
 			FAILL=1
 		fi
 
@@ -373,7 +455,7 @@ fi
 
 			#	echo "    * Server has most recent, replacing"
 				PROGRESS="<== ${PROGRESS}"
-
+				SYNC_DOWN=$((SYNC_DOWN+1))
 				jq -r .task_text <${TDF}.json >>${TDF}.w
 			else
 
@@ -382,6 +464,7 @@ fi
 				if [[ ${PROPS[$P_SYNCLAST]} -gt $LASTSYNC ]] ; then
 #					echo "    * We have most recent, uploading"
 					PROGRESS="==> ${PROGRESS}"
+					SYNC_UP=$((SYNC_UP+1))
 
 					curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$P_SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X PUT $T_SYNCSERVER/api/v1/${SID}/  >${TDF}.json 2>/dev/null
 
@@ -398,14 +481,17 @@ fi
 							# now archived on completion
                                                         # echo "$l" >>${TDFA} 
 							PROGRESS="--- ${PROGRESS}"
+							SYNC_UN=$((SYNC_UN+1))
 							# TODO Mark as archived on server
 						else
 							PROGRESS="<=> ${PROGRESS}"
+							SYNC_UN=$((SYNC_UN+1))
 							echo "$l" >>${TDF}.w 
 						fi
 					else
 
 						PROGRESS="<=> ${PROGRESS}"
+							SYNC_UN=$((SYNC_UN+1))
 						echo "$l" >>${TDF}.w 
 					fi
 				fi
@@ -414,6 +500,7 @@ fi
 
 
 			syncupload
+			SYNC_UP=$((SYNC_UP+1))
 
 			if [[ $SYNC -eq 2 ]] ; then
 				if [[ ${l:1:1} != "D" ]] ; then
@@ -425,10 +512,21 @@ fi
 		fi
 fi
 
-		echo ${PROGRESS}
+		if [[ ${PROGRESS:0:3} == "<=>" ]] ; then
+			if [[ -n "$T_SYNCALL" ]] ; then
+				printf "\r${PROGRESS}\n"
+			fi
+		else
+			printf "\r${PROGRESS}\n"
+		fi
 	C=$((C+1))
 	SEQ=$((SEQ+100))
-	done )  
+	done
+
+echo
+echo "Uploaded: ${SYNC_UP} Downloaded: ${SYNC_DOWN} Unchanged: ${SYNC_UN}"
+
+ )  
 
 
 # process new lines from server
@@ -467,8 +565,9 @@ done
 #cat ${TDF}.seen
 
 echo
-printf "Looking for new items from other lists: "
+echo "Looking for new items from other lists: "
 
+SYNC_DOWN=0
 for a in ${Array3[@]} ; do
 #	echo "* Getting new task ID $a"
 
@@ -492,11 +591,13 @@ THIS_SOURCE="$(jq -r ".list_source"<${TDF}.item)"
 		cansync
 
 if [[ $CAN_SYNC -eq 0 ]] ; then
-		printf "#";
+#		printf "#";
+	activity
 else
 	if [[ ${NEWLINE:1:1} == "D" ]] ; then
 #		echo "   ...Ignoring deleted line we don't have"
-		printf "D";
+	activity
+	#	printf "D";
 		# TODO Mark as archived on server if doing purge
 	else
 
@@ -516,12 +617,16 @@ else
 
 
 
-		printf "+";
+		#printf "+";
+
+	activity
+		SYNC_DOWN=$((SYNC_DOWN+1))
 		echo $TLINE >>${TDF}.w
 	fi
 fi	
 done
-
+echo
+echo "New tasks added: ${SYNC_DOWN}"
 
 
 #rm -f ${TDiF}.full.id ${TDF}.seen ${TDF}.item ${TDF}.full ${TDF}.json
@@ -608,13 +713,33 @@ fi
 			LINE=${LINE%%|*}
 
 
+
+
 	# highlight line
 
 	if [[ -n "${PROPS[$P_HIGHLIGHT]}" ]] ; then
-		highon=$(tput setaf ${PROPS[$P_HIGHLIGHT]})
+                # see if we are using single or double value
+                IFS=":" read -r -a HP <<< "${PROPS[$P_HIGHLIGHT]}"
+                HF=""
+                HB=""
+                if [[ -n "$HP[0]" ]] ; then
+                    HF="tput setaf ${HP[0]};"
+                fi
+                if [[ -n "$HP[1]" ]] ; then
+                    HB="tput setab ${HP[1]};"
+                fi
+		#highon=$(tput setaf ${PROPS[$P_HIGHLIGHT]})
+		highon=$($HB $HF)
 	fi
 
-	L="${highon}$(printf %03d $1) : $LINE" ; 
+	L="${highon}$(printf %03d $1) "
+	if [[ ${PROPS[$P_SYNCLAST]} -gt $T_SYNCLAST ]] ; then
+	L="${L}>"
+	else
+	L="${L}:"
+	fi
+
+	L="$L $LINE" ; 
 
 
 	# display properties
@@ -632,7 +757,12 @@ fi
                         if [[ $WS -gt 0 ]] ; then
 				WS="$(date -d @${WS}) - "
 			 	if [[ ${PROPS[$P_MARKCOM]} -eq 0 ]] ; then
-					WS="${hl_completed}${WS}${hl_highlight}IN PROGRESS${hl_reset}"
+					WS="${hl_completed}${WS}${hl_highlight}IN PROGRESS"
+					if [[ ${PROPS[$P_WORK]} -gt 0 ]] ; then
+						# some work idone so show how much
+						WS="${WS}[${PROPS[$P_WORKED]}/${PROPS[$P_ESTTIME]}]"
+					fi
+					WS="${WS}${hl_reset}"
 				fi
 			fi
 			MC=""
@@ -660,12 +790,25 @@ fi
 		    ARCHIVED) i=${PROPS[$P_ARCHIVED]}
 			;;
 		    DUE) if [[ -n "${PROPS[$P_DUE]}" ]] ; then
+				if [[ "${PROPS[$P_DUE]}" -ne 0 ]]; then
 				i=$(date --date="@${PROPS[$P_DUE]:1}")
 			        overdue=""
 				if [[ ${PROPS[$P_DUE]} -lt ${NOW} ]] ; then
 					overdue=" ${hl_highlight}OVERDUE${reset}"	
 				fi
-				i="${hl_due}(Due: ${i}${overdue})${hl_reset}"
+				i="${hl_due}(Due: ${i}${overdue}"
+                                if [[ ${PROPS[$P_REPEAT]} -gt 0 ]] ; then
+					# there is a repeat so display a hint
+					i="${i}[+${PROPS[$P_REPEAT]}"
+					if [[ ${PROPS[$P_RTYPE]} = " 1 " ]]; then
+						i="${i}c]"
+					else
+						i="${i}d]"
+					fi
+
+   				fi
+                                i="${i})${hl_reset}"
+				fi
 			fi
 			;;
 		    ESTTIME) if [[ -n "${PROPS[$P_ESTTIME]}" ]] ; then
@@ -686,17 +829,29 @@ fi
 				# see if a multiline
 				echo ${PROPS[$P_NOTE]} | grep "~" >/dev/null 2>&1
 				if [[ $? -eq 0 ]] ; then
-					i="${dimon}$( echo ${PROPS[$P_NOTE]} | sed 's/~/\n     /g')${dimoff}"
+					i="${dimon}${hl_note}$( echo ${PROPS[$P_NOTE]} | sed 's/~/\n     /g')${dimoff}"
 				else
-					i="${dimon}:: ${PROPS[$P_NOTE]} ::${dimoff}"
+					i="${dimon}${hl_note}:: ${PROPS[$P_NOTE]} ::${dimoff}"
 				fi
 			fi 
 			;;
                     IND) i="${hl_ind}"
 				if [[ -n ${PROPS[$P_LISTID]} ]] ; then
 					if [[ "${PROPS[$P_LISTID]}" != " " ]] ; then 
+
+
+if [[ "${PROPS[$P_LISTID]}" =~ "-" ]]; then
+	# list id is a slug so show all of it
+						i="${i}/${PROPS[$P_LISTID]}/"
+else
+
+
 						i="${i}/${PROPS[$P_LISTID]:1:3}/"
+fi
 					fi
+				fi
+				if [[ ${PROPS[$P_REPEAT]} -gt 0 ]] ; then
+					i="${i}>"
 				fi
 				if [[ -n ${PROPS[$P_NOTE]} ]] ; then
 					i="${i}+"
@@ -708,9 +863,11 @@ fi
 					i="${i}@"
 				fi
 				if [[ -n ${PROPS[$P_DUE]} ]] ; then
+					if [[ ${PROPS[$P_DUE]} -ne 0 ]] ; then
 					i="${i}!"
 					if [[ ${PROPS[$P_DUE]} -lt ${NOW} ]] ; then
 						i="${i}!"	
+					fi
 					fi
 				fi
 				i="${i}${hl_reset}"
@@ -802,7 +959,7 @@ OLDTASKS=0
 OLDTONEW=0
 UNMARK=0
 DEPENDS=0
-PRIO=0
+PRIO=-1
 TAG=""
 TOARCHIVE=1
 SHOWPROPS=0
@@ -820,7 +977,7 @@ SWITCHLIST=0
 IGNORE_T_TODO=0
 COLLAPSE_TREE=0
 REINDENT=-1
-EST=0
+EST=-1
 WORK=-1
 SHOWGANNT=0
 # totals for gannt rendering
@@ -828,13 +985,16 @@ GANNT_EST=0
 GANNT_WORK=0
 SYNC=0
 REPORT=0
+ISREPEAT=-1
+ISRTYPE=""
+ISTTYPE=""
 
 # indicate line specific or global (settings) flags were used
 
 GIVEN_LINE_FLAG=0
 GIVEN_GLOBAL_FLAG=0
 
-while getopts ":Cud:p:t:aihc:nef:F:H:Ds:E:W:gm:I:oOlLzZr" opt; do
+while getopts ":Cud:p:t:aihc:nef:F:H:Ds:E:W:gm:I:oOlLzZrR:b:T:" opt; do
   case ${opt} in
     z ) # perform sync
         SYNC=1
@@ -872,6 +1032,18 @@ while getopts ":Cud:p:t:aihc:nef:F:H:Ds:E:W:gm:I:oOlLzZr" opt; do
      ;;
     W ) # record some work against the line
         WORK=$OPTARG
+	GIVEN_LINE_FLAG=1
+     ;;
+    R ) # toggle as a repeating due date
+        ISREPEAT=$OPTARG
+	GIVEN_LINE_FLAG=1
+     ;;
+    b ) # toggle as a repeating due date based on due or completed
+        ISRTYPE=$OPTARG
+	GIVEN_LINE_FLAG=1
+     ;;
+    T ) # Assign Task Type WF 
+        ISTTYPE=$OPTARG
 	GIVEN_LINE_FLAG=1
      ;;
     r ) # display some reports
@@ -975,6 +1147,7 @@ t <options>
 s                      Sort by item name (unless dependencies are present)
 -a                     When marking as done send to archive (default enabled)
 -A                     When marking as done disable send to archive
+-b <type> <tid>        Can be 'd' or 'c' to base repeating on completed or due date (default)
 -c <category> <tid..>  Add a category
 -C                     Collapse nested tasks
 -d <tid> <text>        When adding put as dependant on another task
@@ -983,7 +1156,7 @@ s                      Sort by item name (unless dependencies are present)
                        address using the default sender, if you have T_SENDER set then this will be used instead.
 -f <string>            Display todo list with a case sensitive filter (current list) 
 -F <string>            Display todo list with a case sensitive filter (all lists)
--H <colour>            Set a colour highlight on the line(s) (1-8)
+-H <colour>[:<back>]   Set a colour foreground and background highlight on the line(s) (1-8)
 -i                     Ignore T_TODO variable and use defaults
 -I <level> <tid..>     Set new indent level for the given task(s)
 -m <newtid> <tid>      Move <tid> to be at line <newtid>
@@ -991,9 +1164,10 @@ s                      Sort by item name (unless dependencies are present)
 -o                     List contents of archive (old completed) tasks
 -O <tid>               Move <tid> from archive list to current. Use with -o.
 -p <prio> <tid..>      Set priority mark on a task or list of tasks
-
+-R <days> <tid>        Set a repeating due date to number of days after due after each completion (0=disable)
 -s <flag>              Temp sort by the applied flag
--t <tag> <tid..>       Add a tag to a task or list of tasks
+-t <tag> <tid..>       Set a tag to a task or list of tasks. Use -/+ infront to add or remove from tag list
+-T <type> <tid>        Task type for special work flow (See mytdos.besbox.com)
 -u <tid>               Unmark task or list of tasks
 
 
@@ -1040,7 +1214,8 @@ Set the todo list's property display comma delited flags when listing items:
 			MARKCOM
 			ARCHIVED
 			NOTE
-			IND  	Show indicator for presence of notes (+), email (@), a % is shown for work tracking, has a due date (!) and if overdue (!!)
+			IND  	Show indicator for presence of notes (+), email (@), a % is shown for work tracking, has 
+                                a due date (!), greater than (>) to show it is a repeating task and if overdue (!!)
 			DUE
 			ESTTIME
 			WORKED
@@ -1078,6 +1253,7 @@ TDFA=~/todo-archive.txt
 TDFC=~/.todorc-display
 TDFH=~/.todorc-highlight
 TDFS=~/.todorc-sync
+TDFO=~/.todorc-opts
 
 if [[ -a ./todo.txt ]] ; then
 	TDF="./todo.txt"
@@ -1085,6 +1261,7 @@ if [[ -a ./todo.txt ]] ; then
 	TDFC="./.todorc-display"
 	TDFH="./.todorc-highlight"
 	TDFS="./.todorc-sync"
+	TDFO="./.todorc-opts"
 fi
 
 # detect if a specific todolist is given
@@ -1096,10 +1273,20 @@ if [[ IGNORE_T_TODO -eq 0 ]] ; then
 		TDFC="${T_TODO}rc-display"
 		TDFH="${T_TODO}rc-highlight"
 		TDFS="${T_TODO}rc-sync"
+		TDFO="${T_TODO}rc-opts"
 	fi
 fi
 
 # create if not there
+
+if [[ ! -a "$TDFO" ]] ; then
+	# create opts file
+	cat >"$TDFO" <<EOF
+#Auto add with due date (""=disables)
+T_AUTO_DUE="+1 day"
+EOF
+
+fi
 
 if [[ ! -a "$TDFS" ]] ; then
 	# create sync tracking file
@@ -1119,6 +1306,8 @@ T_SYNCEXCLIST=""
 T_SYNCINCSOURCE="t"
 # Exclude source for sync here
 T_SYNCEXCSOURCE=""
+# Time of last sync
+T_SYNCLAST=0
 EOF
 fi
 
@@ -1145,7 +1334,8 @@ if [[ ! -a "$TDFH" ]] ; then
 tput >/dev/null 2>&1
 if [[ \$? -eq 1 && -t 1 ]] ; then
 
-	hl_highlight="\$( tput smso ; tput setaf 1)"
+	hl_highlight="\$( tput smso ; tput setab 7 ; tput setaf 1)"
+	#hl_highlight="\$(  tput setab 1 ; tput setaf 7)"
 	hl_reset="\$( tput rmso ; tput sgr0 )"
 	hl_ulineon="\$( tput smul )"
 	hl_ulineoff="\$( tput rmul )"
@@ -1160,6 +1350,8 @@ if [[ \$? -eq 1 && -t 1 ]] ; then
 	hl_priority="\$( tput setaf 5)"
 	hl_dates="\$( tput setaf 7)"
 	hl_gannt="\$( tput setaf 6)"
+	#hl_note="\$(  tput setab 5 ; tput setaf 7)"
+	hl_note="\$( tput smso ; tput setab 7 ; tput setaf 5)"
 else
 	hl_highlight=""
 	hl_reset=""
@@ -1175,6 +1367,7 @@ else
 	hl_priority=""
 	hl_dates=""
 	hl_gannt=""
+	hl_note=""
 fi
 EOF
 fi
@@ -1188,12 +1381,18 @@ fi
 
 	. "$TDFS"
 
+	# load options
+
+	. "$TDFO"
+
 if [[ $SYNC -ge 1 ]] ; then
 	sync
+	ulockfilerm t
 	exit 0
 fi
 
 
+T_SYNCLAST=$(grep T_SYNCLAST "${TDFS}" | cut -f2 -d'=')
 
 if [[ $GIVEN_GLOBAL_FLAG -eq 1 ]] ; then
         DROPOUT=0
@@ -1209,13 +1408,14 @@ if [[ $GIVEN_GLOBAL_FLAG -eq 1 ]] ; then
 # TODO list over due items
 
 
-	cat $TDF | ( C=1; while read l ; do 
+	grep -v "\[D\]" $TDF | ( C=1; while read l ; do 
 		
 			P_ARRAY=${l#*|}
 
 			IFS='|' read -r -a PROPS <<< "$P_ARRAY"
 			echo " - ${PROPS[$P_LISTID]} "
 		done ) | sort | uniq -c
+		echo "Currently active list: $T_SYNCCURLIST" 
 
 	fi
 
@@ -1232,7 +1432,7 @@ if [[ $GIVEN_GLOBAL_FLAG -eq 1 ]] ; then
 		echo 
 		echo "Lists present here:"
 
-	cat $TDF | ( C=1; while read l ; do 
+	grep -v "\[D\]" $TDF | ( C=1; while read l ; do 
 		
 			P_ARRAY=${l#*|}
 
@@ -1283,8 +1483,8 @@ if [[ $SHOWGANNT -eq 1 ]] ; then
 	GANNT_EST=0
 	GANNT_WORK=0
 
-	ge=$(grep -v "^[D]" $TDF | cut -f $((P_ESTTIME+2)) -d'|' | sed s/_//g)
-	gw=$(grep -v "^[D]" $TDF | cut -f $((P_WORKED+2)) -d'|'|sed s/_//g)
+	ge=$(grep -v "^\[D\]" $TDF | cut -f $((P_ESTTIME+2)) -d'|' | sed s/_//g)
+	gw=$(grep -v "^\[D\]" $TDF | cut -f $((P_WORKED+2)) -d'|'|sed s/_//g)
 
 	for c in $ge ; do
 		if [[ $c -ne 0 ]] ; then
@@ -1388,7 +1588,7 @@ if [[ $# -eq 0 || -n $FILTER ]] ; then
 		echo 
 		echo "Lists present here:"
 
-	cat $TDF | ( C=1; while read l ; do 
+	grep -v "\[D\]" $TDF | ( C=1; while read l ; do 
 		
 			P_ARRAY=${l#*|}
 
@@ -1434,8 +1634,6 @@ if [[ "$1" > "a" ]] ; then
 	FIRST_IS_STRING=1
 fi
 
-####
-
 # is there a mark to complete, remove or some other line operation?
 
 if [[ ! $FIRST_IS_STRING ]] ; then
@@ -1458,6 +1656,14 @@ if [[ ! $FIRST_IS_STRING ]] ; then
 		OTDF="$TDFA"
 		TDFA="$TDF"
 		TDF="$OTDF"
+	fi
+
+	# as tomark has broken the line up. if this is a note set
+	# and it contains numbers we dont want to assume the numbers
+	# are lines to assign the note to. lets only take the first 
+	# one
+	if [[ -n "${NOTE}" ]] ; then
+		TOMARK="~$(echo $TOMARK|cut -f2 -d'~')~"
 	fi
 
 	touch ${TDF}.w
@@ -1487,6 +1693,15 @@ if [[ ! $FIRST_IS_STRING ]] ; then
 			done
 		defaultProps 
 
+
+                       # see if we have a new line number
+
+                       NC=$((C*100))
+                       if [[ ${PROPS[$P_SEQ]} -ne $NC ]] ; then
+#                            echo "*** Have a new line number to update with ${PROPS[$P_SEQ]} -> ${NC}"
+                            PROPS[$P_SEQ]=$NC
+                       fi
+ 
 # set sync properties to defaults if not present
 
 
@@ -1515,18 +1730,58 @@ fi
 
 			LINE=${l%%|*}
 
+               # if the start of the line does not contain [ then make sure it is added
+
+               	if [[ ${LINE:0:1} != "[" ]] ; then
+			LINE="[ ] ${LINE}"
+		fi
 			# process the flags
 
-			if [[ $EST -gt 0 ]] ; then
-				# set work estimate
-				PROPS[$P_ESTTIME]=$EST
-				# reset progress
-				PROPS[$P_PERCENT]=0
-				PROPS[$P_WORKED]=0
-				PROPS[$P_MARKCOM]=0
-                                PROPS[$P_WORKSTART]="_"
+			if [[ $EST -ge 0 ]] ; then
+				if [[ $EST -eq 0 ]] ; then
+					echo "Removing project tracking"
+					PROPS[$P_ESTTIME]="_"
+					PROPS[$P_PERCENT]="_"
+					PROPS[$P_WORKED]="_"
+                                	PROPS[$P_WORKSTART]="_"
+				else
+					# set work estimate
+					PROPS[$P_ESTTIME]=$EST
+					# reset progress
+					PROPS[$P_PERCENT]=0
+					PROPS[$P_WORKED]=0
+					PROPS[$P_MARKCOM]=0
+					PROPS[$P_WORKSTART]="_"
+				fi
 			fi
 
+                        if [[ $ISREPEAT -ge 0 ]]; then
+                                if [[ $ISREPEAT -eq 0 ]] ; then
+	                                echo "Marking a repeat period disabled for this task"
+                                else
+	                                echo "Marking a repeat period of ${ISREPEAT} days"
+                                fi
+                                PROPS[$P_REPEAT]=$ISREPEAT
+                        fi
+
+                        if [[ -n "$ISRTYPE" ]]; then
+			    if [[ ${PROPS[$P_REPEAT]} -gt 0 ]] ; then
+                                if [[ "$ISRTYPE" = "d" ]] ; then
+	                                echo "Marking repeat is based on due date"
+					ISRTYPE="0"
+                                else
+	                                echo "Marking repeat is based on completion"
+					ISRTYPE="1"
+                                fi
+                                PROPS[$P_RTYPE]=$ISRTYPE
+			    else
+	                                echo "Marking a repeat period disabled for this task"
+			    fi
+                        fi
+
+                        if [[ -n "$ISTTYPE" ]]; then
+                               PROPS[$P_TTYPE]=$ISTTYPE
+                        fi
 			if [[ $WORK -ge 0 ]] ; then
 #	                         echo "est /${PROPS[$P_WORKSTART]}/"
 				# record work against the task
@@ -1555,7 +1810,17 @@ echo "Marking start of work"
 			fi
 
 			if [[ -n "$TAG" ]] ; then
-				PROPS[$P_TAG]=$TAG
+				CURTAG=${PROPS[$P_TAG]}
+				if [[ "${TAG:0:1}" = "+" ]]; then
+					# add a tag and not replace
+					CURTAG="${CURTAG}${TAG:1}"
+				elif [[ "${TAG:0:1}" = "-" ]] ; then
+					# remove etl_flags
+					CURTAG="${CURTAG/${TAG:1}/}"
+				else
+					CURTAG=$TAG
+				fi
+				PROPS[$P_TAG]=$CURTAG
 			fi
 
 			if [[ $EMAIL -ne 0 ]] ; then
@@ -1569,8 +1834,12 @@ echo "Marking start of work"
 			fi
 
 
-			if [[ $PRIO -ne 0 ]] ; then
-				PROPS[$P_PRIO]=$PRIO
+			if [[ $PRIO -ge 0 ]] ; then
+				if [[ $PRIO -eq 0 ]] ; then
+					PROPS[$P_PRIO]="_"
+				else
+					PROPS[$P_PRIO]=$PRIO
+				fi
 			fi
 
 			if [[ -n "$CATEGORY" ]] ; then
@@ -1579,7 +1848,13 @@ echo "Marking start of work"
 
 			if [[ $DUEDATE -eq 1 ]] ; then
 				shift
-				dateline=$(date +%s --date "${*}") 
+				if [[ "${*}" = "" || "${*}" = "0" ]] ; then
+					# disable due date
+					echo "Removing due date"
+					dateline="_"
+				else
+					dateline=$(date +%s --date "${*}") 
+				fi
 				PROPS[$P_DUE]="${dateline}"
 			fi
 
@@ -1596,18 +1871,46 @@ echo "Marking start of work"
 				fi
 			fi
 
+if [[ $DEPENDS -gt 0 ]]; then
+#Change dependancy
+DID="${*}"
+
+	# find out indent of parent
+
+	CINDENT=`sed "${DEPENDS}q;d" $TDF | cut -b5- | cut -f1 -d' '`
+
+	if [[ ${CINDENT:0:1} != "-" ]] ; then
+		# not indented
+		CINDENT=""
+	fi
+
+	CINDENT="${CINDENT}--+"
+
+    # Get local parent id which is created date (after sync it can change to real task id)
+	PTID=$(sed "${DEPENDS}q;d" $TDF | cut -f2 -d'|')
+
+	#echo $CINDENT
+	PROPS[${P_DEPENDID}]=${PTID}
+	LINE=$(echo $LINE | sed "s/\] /\] ${CINDENT} /")
+	
+fi
+
+
 			if [[ $NOTE -eq 1 ]] ; then
 				shift
-				noteline="${*}" 
-				if [[ "${noteline:0:1}" == "+" ]] ; then
-					# add to existing notes
-				
-					noteadd="${PROPS[$P_NOTE]}~"
-					noteline="${noteline:1}"
-				else
-					noteadd="_"
+				noteline="${*}"
+                                if [[ -n "${*}" ]] ; then 
+					if [[ "${noteline:0:1}" == "+" ]] ; then
+						# add to existing notes
+						noteline="${noteline:1}"
+						PROPS[$P_NOTE]="${PROPS[$P_NOTE]} ~ ${noteline}"
+					else
+						PROPS[$P_NOTE]="${noteline}"
+					fi
+				else 
+					# clear note when giving no string
+					PROPS[$P_NOTE]="_"
 				fi
-				PROPS[$P_NOTE]="${noteadd}${noteline}"
 			fi
 
 			if [[ $UNMARK -eq 1 ]] ; then
@@ -1682,32 +1985,49 @@ else
 							echo "Archive to ${TDFA}: $LINE"
 							echo "$l" >>${TDFA} 
 						fi
-					if [[ -n "$T_SYNCAPI" ]] ; then
-						LINE="[D] ${LINE:4}"
-						OUTPUT=1
-					fi
+						if [[ -n "$T_SYNCAPI" ]] ; then
+							LINE="[D] ${LINE:4}"
+							OUTPUT=1
+						fi
+					#fi
 					#fi
 				else
-					# mark as done
-					
-					LINE="[*] ${LINE:4}"
-					echo "Done: $LINE"
+					# if a repeating task then reset required props
 
-					# handle the properties
+ 					if [[ ${PROPS[$P_REPEAT]} -gt 0 ]] ; then
+						PROPS[$P_MARKCOM]="$(date +%s)"
+                                                # calc unix timestamp of days to add
+                                                REPDAYS=$((PROPS[$P_REPEAT]*86400))
+if [[ "${PROPS[$P_RTYPE]}" = " 0 " ]] ; then
+						echo "A repeating task, calculating ${PROPS[$P_REPEAT]} days after next due date"
+   						PROPS[$P_DUE]=$((PROPS[$P_DUE]+$REPDAYS))
+else
+						echo "A repeating task, calculating ${PROPS[$P_REPEAT]} days after completion"
+   						PROPS[$P_DUE]=$((PROPS[$P_MARKCOM]+$REPDAYS))
+fi
+						OUTPUT=1
+					else
+						# mark as done
+						
+						LINE="[*] ${LINE:4}"
+						echo "Done: $LINE"
 
-					PROPS[$P_MARKCOM]="$(date +%s)"
+						# handle the properties
 
-					# if there is an attached email then send an email
+						PROPS[$P_MARKCOM]="$(date +%s)"
 
-					if [[ -n ${PROPS[$P_EMAIL]} ]] ; then
-					if [[ "${PROPS[$P_EMAIL]}" -ne "_" ]] ; then
-						if [[ -n "${T_SENDER}" ]]  ; then
-							from="-f ${T_SENDER}"
-						else
-							from=""
+						# if there is an attached email then send an email
+
+						if [[ -n ${PROPS[$P_EMAIL]} ]] ; then
+						if [[ "${PROPS[$P_EMAIL]}" -ne "_" ]] ; then
+							if [[ -n "${T_SENDER}" ]]  ; then
+								from="-f ${T_SENDER}"
+							else
+								from=""
+							fi
+							echo "Subject: DONE $LINE" | sendmail ${from} ${PROPS[$P_EMAIL]} >/dev/null 2>&1
 						fi
-						echo "Subject: DONE $LINE" | sendmail ${from} ${PROPS[$P_EMAIL]} >/dev/null 2>&1
-					fi
+						fi
 					fi
 		fi
 				fi
@@ -1731,7 +2051,6 @@ el=$(echo "$el" |sed 's/^ *//;s/ *$//')
 #				echo "el $el"
 				l="$l | $el"
 			done
-
 		fi 
 
 		# output original or reconstructed line
@@ -1750,6 +2069,16 @@ el=$(echo "$el" |sed 's/^ *//;s/ *$//')
 	exit 2
 fi
 
+
+
+if [[ -n "${T_AUTO_DUE}" ]] ; then
+	auto_date=$(date +%s --date "${T_AUTO_DUE}") 
+else
+	auto_date="_"
+fi
+
+
+
 if [[ $DEPENDS -ne 0 ]] ; then
 	# if it needs to depend on something else then insert the line
 
@@ -1762,33 +2091,42 @@ if [[ $DEPENDS -ne 0 ]] ; then
 		CINDENT=""
 	fi
 
+        # get line number of parent
+
+	PLINE=$(sed "${DEPENDS}q;d" $TDF | cut -f${P_SEQ} -d'|')
+        PLINE=$((PLINE+50))
+	#echo "Parent line number $PLINE"
+
 	# TODO cant add one to the last item
 	# TODO if beyond end of file then not added
-
+    # Get local parent id which is created date (after sync it can change to real task id)
+	PTID=$(sed "${DEPENDS}q;d" $TDF | cut -f2 -d'|')
 
 	LINEINFILE=`cat $TDF |wc -l`
 
 	if [[ $DEPENDS -ge $LINEINFILE ]] ; then
-		echo "[ ] ${CINDENT}--+ $* | ${NOW} | ${USER} | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | ${T_SYNCCURLIST} | ${NOW} | ${NOW} | t |"  >>$TDF
+		echo "[ ] ${CINDENT}--+ $* | ${NOW} | ${USER} | _ | _ | _ | _ | _ | _ | _ | ${auto_date} | _ | _ | _ | _ | _ | ${PTID} | _ | ${T_SYNCCURLIST} | ${NOW} | ${NOW} | t | ${PLINE} | _ | _ | _ | _ | _ |"  >>$TDF
 	else
 
 	# while parent has other children skip them
 
 	DEPENDS=$((DEPENDS + 1 ))
 sed -i.bak "${DEPENDS}i\
-\[ \] ${CINDENT}--+ ${*} | ${NOW} | ${USER} | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | ${T_SYNCCURLIST} | ${NOW} | ${NOW} | t |\
+\[ \] ${CINDENT}--+ ${*} | ${NOW} | ${USER} | _ | _ | _ | _ | _ | _ | _ | ${auto_date} | _ | _ | _ | _ | _ | ${PTID} | _ | ${T_SYNCCURLIST} | ${NOW} | ${NOW} | t | _ | _ | _ | _ | _ | \
 " $TDF
 fi
 else
 
 	# no, so lets add to the end
+	LINEINFILE=`cat $TDF |wc -l`
+        LINEINFILE=$((LINEINFILE*100))
+        #echo "New Line number should be $LINEINFILE"
 	
-	# add | at the end of the line and use it to record who added and when etc. other properties?
+		# add | at the end of the line and use it to record who add
+		l="[ ] ${*} | ${NOW} | ${USER}  | _ | _ | _ | _ | _ | _ | _ | ${auto_date} | _ | _ | _ | _ | _ | _ | _ | ${T_SYNCCURLIST} | ${NOW} | ${NOW} | t | $LINEINFILE | _ | _ | _ | _ | _ | _ |" 
 
-	l="[ ] ${*} | ${NOW} | ${USER}  | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | _ | ${T_SYNCCURLIST} | ${NOW} | ${NOW} | t |" 
-
-#		LINE=${l%%|*}
-	echo $l>>$TDF	
+	#		LINE=${l%%|*}
+		echo $l>>$TDF	
 #	syncupload
 
 	fi
