@@ -3,6 +3,8 @@
 # Todo lists nice and simple with a basic project planner capability
 # by Kevin Groves kgroves@besbox.com
 
+DEBUG=0
+
 # use new sync method
 # TODO make this optional
 T_NEWSYNC=1
@@ -13,11 +15,11 @@ T_NEWSYNC=1
 # TODO now need a function to handle line and properties as its getting complicated :-)
 
 function ulockfilerm {
-rm /tmp/lock.$1
+rm ${TDFLOCK}
 }
 
 function ulockfile {
-LOCKFILE=/tmp/lock.$1
+LOCKFILE=${TDFLOCK}
 if [[ -a $LOCKFILE ]] ; then
 
         # check to see if the pid is running
@@ -168,24 +170,34 @@ CAN_SYNCS=0
 
 if [[ -z "${T_SYNCINCLIST}" ]] ; then
 	CAN_SYNC=1
-#	echo "Inc all"
+#if [[ $DEBUG -eq 1 ]] ; then
+#	echo "Inc all" >>/tmp/t.debug
+#fi
 else
 # Include lists for sync here
 for csl in $T_SYNCINCLIST ; do
-#	echo "inc $csl "
+#if [[ $DEBUG -eq 1 ]] ; then
+#	echo "inc $csl " >>/tmp/t.debug
+#fi
 	if [[ " $csl " = "${THIS_LIST}"  || "$csl" = "${THIS_LIST}" ]] ; then
 		CAN_SYNC=1
-#		echo "*"
+#if [[ $DEBUG -eq 1 ]] ; then
+#		echo "*" >>/tmp/t.debug
+#fi
 	fi
 done
 fi
 
 # Exclude lists for sync here
 for csl in $T_SYNCEXCLIST ; do 
-#	echo "exc $csl "
+#if [[ $DEBUG -eq 1 ]] ; then
+#	echo "exc $csl " >>/tmp/t.debug
+#fi
 	if [[ " $csl " = "${THIS_LIST}" || "$csl" = "${THIS_LIST}" ]] ; then
 		CAN_SYNC=0
-#		echo "*"
+#if [[ $DEBUG -eq 1 ]] ; then
+#		echo "*" >>/tmp/t.debug
+#fi
 	fi
 done
 
@@ -246,7 +258,10 @@ function syncupload {
 				return
 			fi
 
-#			echo "    * Uploading /${PROPS[$P_SEQ]}/"
+if [[ $DEBUG -eq 1 ]] ; then
+			echo "---------------------- NEW" >>/tmp/t.debug
+			echo "    * Uploading new /${PROPS[$P_SEQ]}/ $l" >>/tmp/t.debug
+fi
 				PROGRESS="--> ${PROGRESS}"
 			curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X POST $T_SYNCSERVER/api/v1/  >${TDF}.json 2>/dev/null
 
@@ -259,16 +274,23 @@ function syncupload {
 			PROPS[$P_SYNCLAST]=$(date +%s)
 			echo "${PROPS[$P_SYNCID]}" >>${TDF}.seen
 
+if [[ $DEBUG -eq 1 ]] ; then
+echo "Id to update ${PROPS[$P_SYNCID]}" >>/tmp/t.debug
+fi
 
 # write out line for all items include those not in sync (for some reason)
-			l=$(echo ${LINE} | sed 's/ *$//')
+			l=$(echo "${LINE}" | sed 's/ *$//')
 
 			for el in "${PROPS[@]}" ; do 
 				el=$(echo "$el" |sed 's/^ *//;s/ *$//')
 				l="$l | $el"
 			done
+if [[ $DEBUG -eq 1 ]] ; then
+echo "$l" >>/tmp/t.debug
+fi
 			curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$P_SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X PUT $T_SYNCSERVER/api/v1/${PROPS[$P_SYNCID]}/  >${TDF}.json 2>/dev/null
 }
+
 function sync {
 
 # TODO detect for [D] on remote line to flag as a local delete
@@ -327,18 +349,66 @@ cp --backup=t "${TDF}" "${TDF}.presync" -v
 if [[ -n "$T_NEWSYNC" ]]; then
 	# get the full list of items
 	echo "Download task list..."
-	curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/ 2>/dev/null >${TDF}.full
 
-        if [[ ! -s ${TDF}.full ]] ; then
-		echo "Server has no data. Were you expect this? Ctrl-C if not or press enter if OK"
-		read A
-		sleep 30
-		echo "Starting sync...."
-	fi
+    # Init the full list for the rest of the processing
+
+    echo "[">${TDF}.full
+
+    # get first batch which may or may not have page count
+
+    MOREPAGES=1
+    MORE=""
+    
+    while [[ $MOREPAGES -gt 0 ]] ; do
+        curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/$MORE 2>/dev/null >${TDF}.page
+
+
+        if [[ ! -s ${TDF}.page ]] ; then
+            echo "Server has no data. Were you expecting this? Ctrl-C if not or press enter if OK"
+            read A
+            sleep 30
+            echo "Starting sync...."
+        fi
+        #grep nginx ${TDF}.page >/dev/null
+        #if [[ $? -eq 0 ]] ; then
+        #    echo "Server has responded with an error. Were you expecting this? Ctrl-C if not or press enter if OK"
+        #    read A
+        #    sleep 30
+        #fi
+
+        if [[ $MOREPAGES -gt 1 ]] ; then
+            echo "," >>${TDF}.full
+        else
+            TASKCT=$(jq -c '.count' ${TDF}.page)
+            echo "Task Count: $TASKCT"
+        fi
+
+        # add this batch to the full batch 
+
+        jq -c ".results" ${TDF}.page | cut -b2- | sed 's/\]$//' >>${TDF}.full 
+
+        # Any more pages to get?
+        MORE=$(jq -c '.next' ${TDF}.page|sed 's/null//'|sed 's/"//g'|cut -f2 -d'?')
+        if [[ -z "$MORE" ]]; then
+                MOREPAGES=0
+        else
+        
+                MOREPAGES=$((MOREPAGES+1))
+                MORE="?${MORE}"
+        fi
+
+        activity
+    done
+            echo "]" >>${TDF}.full
 fi
-
+echo
 echo "Scanning tasks..."
 
+if [[ $DEBUG -eq 1 ]] ; then
+echo "-------------------------------------" >>/tmp/t.debug
+echo "Starting" >>/tmp/t.debug
+date >>/tmp/t.debug
+fi
 # record time we started sync (for flagging if a line changes)
 
 grep T_SYNCLAST "${TDFS}" >/dev/null 2>&1
@@ -367,10 +437,16 @@ cat "$TDF" | ( SEQ=100; C=1;
 
 		LINE=${l%%|*}
 
-		SID=$(echo ${PROPS[$P_SYNCID]} | sed 's/ //g')
+		SID=$(echo "${PROPS[$P_SYNCID]}" | sed 's/ //g')
+if [[ $DEBUG -eq 1 ]] ; then
+echo "SID 1 ${SID}" >>/tmp/t.debug
+fi
 		if [[ "$SID" = "_" ]] ; then
 			SID=$(date +%s)
 		fi
+if [[ $DEBUG -eq 1 ]] ; then
+echo "SID 2 ${SID}" >>/tmp/t.debug
+fi
 			if [[ "${PROPS[$P_SEQ]}" = "  " ]] ; then
 				PROPS[$P_SEQ]=${SEQ}
 			fi
@@ -383,6 +459,10 @@ cat "$TDF" | ( SEQ=100; C=1;
 
 		PROGRESS=": ${LINE}"
 
+if [[ $DEBUG -eq 1 ]] ; then
+echo "---" >>/tmp/t.debug
+echo "Line ${LINE}" >>/tmp/t.debug
+fi
 
 		# look up sync id for task
 		# if not exists then add with current sync time and update sync id to the one it gives back
@@ -411,9 +491,14 @@ if [[ $CAN_SYNC -eq 0 ]] ; then
 	echo "$l" >>${TDF}.w 
 else
 
+if [[ $DEBUG -eq 1 ]] ; then
+	echo "Checking task  /${l}/" >>/tmp/t.debug
+fi
 
 if [[ -n "$T_NEWSYNC" ]]; then
-	#echo "Get task from download ${SID}"
+if [[ $DEBUG -eq 1 ]] ; then
+	echo "Get task from download /${SID}/" >>/tmp/t.debug
+fi
 	# look up id in fullv2 and create RES var
         if [[ -z "${SID}" ]] ; then
              SID=0
@@ -421,11 +506,19 @@ if [[ -n "$T_NEWSYNC" ]]; then
 
 	RES=$(jq -c ".[] | select(.id == ${SID})" ${TDF}.full 2>/dev/null)
 	#echo $RES
+if [[ $DEBUG -eq 1 ]] ; then
+	echo "Download lookup result /${RES}/" >>/tmp/t.debug
+fi
 else
+if [[ $DEBUG -eq 1 ]] ; then
+echo "Lookup task by id ${SID}" >>/tmp/t.debug
+fi
 		# look up task by id
 		RES=$(curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/${SID}/ 2>/dev/null) 
 fi
-#echo "*${RES}*"
+if [[ $DEBUG -eq 1 ]] ; then
+echo "*${RES}*" >>/tmp/t.debug
+fi
 
 		# check for look up failure
 		FAILL=0
@@ -433,19 +526,33 @@ fi
 
 		if [[ "$RES" = "{\"detail\":\"Not found.\"}" ]] ; then
 			FAILL=1
+if [[ $DEBUG -eq 1 ]] ; then
+echo "Faill a" >>/tmp/t.debug
+fi
 		fi
 		if [[ -z "$RES" ]] ; then
 			FAILL=1
+if [[ $DEBUG -eq 1 ]] ; then
+echo "Faill b" >>/tmp/t.debug
+fi
 		fi
 		if [[ $SID -eq 0 ]] ; then
 			FAILL=1
+if [[ $DEBUG -eq 1 ]] ; then
+echo "Faill c" >>/tmp/t.debug
+fi
 		fi
 
+if [[ $DEBUG -eq 1 ]] ; then
+echo "Faill ${FAILL}" >>/tmp/t.debug
+fi
 
 		if [[ $FAILL -eq 0 ]] ; then
 # its here
-#			echo "    * It existsi"
-			echo $RES>${TDF}.json
+if [[ $DEBUG -eq 1 ]] ; then
+			echo "    * It existsi" >>/tmp/t.debug
+fi
+			echo "$RES">${TDF}.json
 
 # get last sync time
 
@@ -453,16 +560,23 @@ fi
 
 			if [[ ${PROPS[$P_SYNCLAST]} -lt $LASTSYNC ]] ; then
 
-			#	echo "    * Server has most recent, replacing"
+if [[ $DEBUG -eq 1 ]] ; then
+				echo "    * Server has most recent, replacing" >>/tmp/t.debug
+				cat ${TDF}.json >>/tmp/t.debug
+fi
 				PROGRESS="<== ${PROGRESS}"
 				SYNC_DOWN=$((SYNC_DOWN+1))
 				jq -r .task_text <${TDF}.json >>${TDF}.w
 			else
 
 
-#				echo "sync times: us ${PROPS[$P_SYNCLAST]} server  $LASTSYNC "
+if [[ $DEBUG -eq 1 ]] ; then
+				echo "sync times: us ${PROPS[$P_SYNCLAST]} server  $LASTSYNC " >>/tmp/t.debug
+fi
 				if [[ ${PROPS[$P_SYNCLAST]} -gt $LASTSYNC ]] ; then
-#					echo "    * We have most recent, uploading"
+if [[ $DEBUG -eq 1 ]] ; then
+					echo "    * We have most recent, uploading $l" >>/tmp/t.debug
+fi
 					PROGRESS="==> ${PROGRESS}"
 					SYNC_UP=$((SYNC_UP+1))
 
@@ -473,7 +587,9 @@ fi
 			fi
 
 				if [[ ${PROPS[$P_SYNCLAST]} -eq $LASTSYNC ]]; then
-					#echo "    * No change"
+if [[ $DEBUG -eq 1 ]] ; then
+					echo "    * No change" >>/tmp/t.debug
+fi
 
 					if [[ $SYNC -eq 2 ]] ; then				
 						if [[ ${LINE:1:1} == "D" ]] ; then
@@ -499,6 +615,9 @@ fi
 		else 
 
 
+if [[ $DEBUG -eq 1 ]] ; then
+echo "syncupload call $l" >>/tmp/t.debug
+fi
 			syncupload
 			SYNC_UP=$((SYNC_UP+1))
 
@@ -609,6 +728,7 @@ else
 
 		TLINE=${NEWLINE%%|*}
 		
+        echo "${TLINE}"
 		PROPS[$P_SYNCID]=$a
 		for el in "${PROPS[@]}" ; do 
 			el=$(echo "$el" |sed 's/^ *//;s/ *$//')
@@ -616,12 +736,14 @@ else
 		done
 
 
-
 		#printf "+";
 
 	activity
 		SYNC_DOWN=$((SYNC_DOWN+1))
-		echo $TLINE >>${TDF}.w
+		echo "$TLINE" >>${TDF}.w
+if [[ $DEBUG -eq 1 ]] ; then
+echo "New line ${TLINE}" >>/tmp/t.debug
+fi
 	fi
 fi	
 done
@@ -747,7 +869,7 @@ fi
 		i=""
 		case "$el" in 
                     TAG) if [[ -n "${PROPS[$P_TAG]}" ]] ; then 
-				i="${hl_tag}#${PROPS[$P_TAG]}#${hl_reset}" 
+				i="${hl_tag}#${PROPS[$P_TAG]:1} ${hl_reset}" 
 				fi
 			;;
 		    MARKCOM) # if there is a work started date then reformat for display
@@ -827,9 +949,9 @@ fi
 			;;
 		    NOTE) if [[ -n ${PROPS[$P_NOTE]} ]] ; then
 				# see if a multiline
-				echo ${PROPS[$P_NOTE]} | grep "~" >/dev/null 2>&1
+				echo "${PROPS[$P_NOTE]}" | grep "~" >/dev/null 2>&1
 				if [[ $? -eq 0 ]] ; then
-					i="${dimon}${hl_note}$( echo ${PROPS[$P_NOTE]} | sed 's/~/\n     /g')${dimoff}"
+					i="${dimon}${hl_note}$( echo "${PROPS[$P_NOTE]}" | sed 's/~/\n     /g')${dimoff}"
 				else
 					i="${dimon}${hl_note}:: ${PROPS[$P_NOTE]} ::${dimoff}"
 				fi
@@ -888,6 +1010,28 @@ fi
 		else
 			return
 		fi
+	fi
+        # List if due is coming up
+	if [[ ${UPCOMING} -gt 0 ]] ; then
+		# apply a filter check
+		if [[ ${PROPS[$P_DUE]} -gt $NOW ]]; then
+			if [[ ${PROPS[$P_DUE]} -lt ${UPCOMING} ]] ; then
+				:
+			else
+				return
+			fi
+		else
+			return
+		fi
+	fi
+        # List last changed
+	if [[ ${LASTCHANGED} -gt 0 ]] ; then
+		# apply a filter check
+			if [[ ${PROPS[$P_SYNCLAST]} -gt ${LASTCHANGED} ]] ; then
+				:
+			else
+				return
+			fi
 	fi
 
 	echo "$L${highoff}${hl_reset}"
@@ -948,7 +1092,6 @@ fi
 
 
 
-ulockfile t
 
 NOW=$(date +%s)
 
@@ -988,13 +1131,15 @@ REPORT=0
 ISREPEAT=-1
 ISRTYPE=""
 ISTTYPE=""
+UPCOMING=-1
+LASTCHANGED=-1
 
 # indicate line specific or global (settings) flags were used
 
 GIVEN_LINE_FLAG=0
 GIVEN_GLOBAL_FLAG=0
 
-while getopts ":Cud:p:t:aihc:nef:F:H:Ds:E:W:gm:I:oOlLzZrR:b:T:" opt; do
+while getopts ":Cud:p:t:aihc:nef:F:H:Ds:E:W:gm:I:oOlLzZrR:b:T:U:S:" opt; do
   case ${opt} in
     z ) # perform sync
         SYNC=1
@@ -1049,6 +1194,26 @@ while getopts ":Cud:p:t:aihc:nef:F:H:Ds:E:W:gm:I:oOlLzZrR:b:T:" opt; do
     r ) # display some reports
         REPORT=1
 	GIVEN_GLOBAL_FLAG=1
+     ;;
+    U ) # display upcoming tasks
+        UPCOMINGD=$OPTARG
+        UPCOMING=$((UPCOMINGD * 86400))
+        UPCOMING=$((UPCOMING + NOW))
+        # calc unix timestamp to use
+	echo "Non-overdue tasks coming up in the next $OPTARG days"
+
+	GIVEN_GLOBAL_FLAG=1
+       GFILTER=1
+     ;;
+    S ) # display last changed
+        LASTCHANGEDD=$OPTARG
+        LASTCHANGED=$((LASTCHANGEDD * 86400))
+        LASTCHANGED=$((NOW - LASTCHANGED))
+        # calc unix timestamp to use
+	echo "Tasks changed within the last $OPTARG days"
+
+	GIVEN_GLOBAL_FLAG=1
+       GFILTER=1
      ;;
     s ) # temp sort by property
         SORTON=$OPTARG
@@ -1166,10 +1331,11 @@ s                      Sort by item name (unless dependencies are present)
 -p <prio> <tid..>      Set priority mark on a task or list of tasks
 -R <days> <tid>        Set a repeating due date to number of days after due after each completion (0=disable)
 -s <flag>              Temp sort by the applied flag
+-S <days>              List tasks changed within the last <days>
 -t <tag> <tid..>       Set a tag to a task or list of tasks. Use -/+ infront to add or remove from tag list
 -T <type> <tid>        Task type for special work flow (See mytdos.besbox.com)
 -u <tid>               Unmark task or list of tasks
-
+-U <days>              List upcoming due dates within the next <days>
 
 Project Planning Switches:
 --------------------------
@@ -1234,7 +1400,7 @@ EOF
 
 
 
-		ulockfilerm t
+#		ulockfilerm t
 	exit 0
      ;;
     \? ) echo "For useage: t -h"
@@ -1249,6 +1415,7 @@ shift $((OPTIND -1))
 # prefer local dir and if not found then try home 
 
 TDF=~/todo.txt
+TDFLOCK=~/todo.txt.lock
 TDFA=~/todo-archive.txt
 TDFC=~/.todorc-display
 TDFH=~/.todorc-highlight
@@ -1257,6 +1424,7 @@ TDFO=~/.todorc-opts
 
 if [[ -a ./todo.txt ]] ; then
 	TDF="./todo.txt"
+	TDFLOCK="./todo.txt.lock"
 	TDFA="./todo-archive.txt"
 	TDFC="./.todorc-display"
 	TDFH="./.todorc-highlight"
@@ -1269,6 +1437,7 @@ fi
 if [[ IGNORE_T_TODO -eq 0 ]] ; then
 	if [[ -n $T_TODO ]] ; then
 		TDF="$T_TODO"
+		TDFLOCK="$T_TODO.lock"
 		TDFA="${T_TODO}-archive.txt"
 		TDFC="${T_TODO}rc-display"
 		TDFH="${T_TODO}rc-highlight"
@@ -1276,6 +1445,8 @@ if [[ IGNORE_T_TODO -eq 0 ]] ; then
 		TDFO="${T_TODO}rc-opts"
 	fi
 fi
+
+ulockfile t
 
 # create if not there
 
@@ -1332,7 +1503,7 @@ if [[ ! -a "$TDFH" ]] ; then
 # adjust colours to match your requirements
 
 tput >/dev/null 2>&1
-if [[ \$? -eq 1 && -t 1 ]] ; then
+if [[ \$? -eq 2 && -t 1 ]] ; then
 
 	hl_highlight="\$( tput smso ; tput setab 7 ; tput setaf 1)"
 	#hl_highlight="\$(  tput setab 1 ; tput setaf 7)"
@@ -1663,7 +1834,7 @@ if [[ ! $FIRST_IS_STRING ]] ; then
 	# are lines to assign the note to. lets only take the first 
 	# one
 	if [[ -n "${NOTE}" ]] ; then
-		TOMARK="~$(echo $TOMARK|cut -f2 -d'~')~"
+		TOMARK="~$(echo "$TOMARK"|cut -f2 -d'~')~"
 	fi
 
 	touch ${TDF}.w
@@ -1867,7 +2038,7 @@ echo "Marking start of work"
 
 				else
 					# replace spaces with a dash
-					PROPS[$P_LISTID]="$(echo ${*} | sed 's/ /-/g')"
+					PROPS[$P_LISTID]="$(echo "${*}" | sed 's/ /-/g')"
 				fi
 			fi
 
@@ -1891,7 +2062,7 @@ DID="${*}"
 
 	#echo $CINDENT
 	PROPS[${P_DEPENDID}]=${PTID}
-	LINE=$(echo $LINE | sed "s/\] /\] ${CINDENT} /")
+	LINE=$(echo "$LINE"/ | sed "s/\] /\] ${CINDENT} /")
 	
 fi
 
@@ -2119,6 +2290,7 @@ else
 
 	# no, so lets add to the end
 	LINEINFILE=`cat $TDF |wc -l`
+	echo $((LINEINFILE+1))>/dev/stderr
         LINEINFILE=$((LINEINFILE*100))
         #echo "New Line number should be $LINEINFILE"
 	
@@ -2130,6 +2302,7 @@ else
 #	syncupload
 
 	fi
+
 	
 #fi
 
