@@ -5,6 +5,8 @@
 
 DEBUG=0
 
+X_CLIENT=$(hostname)
+
 # use new sync method
 # TODO make this optional
 T_NEWSYNC=1
@@ -263,7 +265,7 @@ if [[ $DEBUG -eq 1 ]] ; then
 			echo "    * Uploading new /${PROPS[$P_SEQ]}/ $l" >>/tmp/t.debug
 fi
 				PROGRESS="--> ${PROGRESS}"
-			curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X POST $T_SYNCSERVER/api/v1/  >${TDF}.json 2>/dev/null
+			curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}" -F "last_sync=${PROPS[$SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X POST $T_SYNCSERVER/api/v1/  >${TDF}.json 2>/dev/null
 
 # TODO handle server error returning "<h1>Server Error (500)</h1>"
 #sleep 2
@@ -288,7 +290,7 @@ fi
 if [[ $DEBUG -eq 1 ]] ; then
 echo "$l" >>/tmp/t.debug
 fi
-			curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$P_SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X PUT $T_SYNCSERVER/api/v1/${PROPS[$P_SYNCID]}/  >${TDF}.json 2>/dev/null
+			curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}" -F "last_sync=${PROPS[$P_SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X PUT $T_SYNCSERVER/api/v1/${PROPS[$P_SYNCID]}/  >${TDF}.json 2>/dev/null
 }
 
 function sync {
@@ -360,7 +362,7 @@ if [[ -n "$T_NEWSYNC" ]]; then
     MORE=""
     
     while [[ $MOREPAGES -gt 0 ]] ; do
-        curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/$MORE 2>/dev/null >${TDF}.page
+        curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}" -X GET $T_SYNCSERVER/api/v1/$MORE 2>/dev/null >${TDF}.page
 
 
         if [[ ! -s ${TDF}.page ]] ; then
@@ -514,7 +516,7 @@ if [[ $DEBUG -eq 1 ]] ; then
 echo "Lookup task by id ${SID}" >>/tmp/t.debug
 fi
 		# look up task by id
-		RES=$(curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/${SID}/ 2>/dev/null) 
+		RES=$(curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}" -X GET $T_SYNCSERVER/api/v1/${SID}/ 2>/dev/null) 
 fi
 if [[ $DEBUG -eq 1 ]] ; then
 echo "*${RES}*" >>/tmp/t.debug
@@ -580,7 +582,7 @@ fi
 					PROGRESS="==> ${PROGRESS}"
 					SYNC_UP=$((SYNC_UP+1))
 
-					curl   -H "Authorization: Token ${T_SYNCAPI}" -F "last_sync=${PROPS[$P_SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X PUT $T_SYNCSERVER/api/v1/${SID}/  >${TDF}.json 2>/dev/null
+					curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}" -F "last_sync=${PROPS[$P_SYNCLAST]}" -F "line_no=${PROPS[$P_SEQ]}" -F "list_source=t" -F "list_id=${PROPS[$P_LISTID]}" -F "task_text=$l" -X PUT $T_SYNCSERVER/api/v1/${SID}/  >${TDF}.json 2>/dev/null
 
 										echo "$l" >>${TDF}.w 
 				fi
@@ -654,7 +656,7 @@ echo "Uploaded: ${SYNC_UP} Downloaded: ${SYNC_DOWN} Unchanged: ${SYNC_UN}"
 
 
 if [[ -z "$T_NEWSYNC" ]]; then
-	curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/ 2>/dev/null >${TDF}.full
+	curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}"  -X GET $T_SYNCSERVER/api/v1/ 2>/dev/null >${TDF}.full
 fi
 
 # get the ids from the json of the full list and add any that are unknown
@@ -698,7 +700,7 @@ if [[ -n "$T_NEWSYNC" ]]; then
 	# look up id in fullv2 and create RES var
 	jq -c ".[] | select(.id == ${a})" ${TDF}.full >${TDF}.item 2>/dev/null
 else
-	curl   -H "Authorization: Token ${T_SYNCAPI}"  -X GET $T_SYNCSERVER/api/v1/${a}/ 2>/dev/null >${TDF}.item
+	curl   -H "Authorization: Token ${T_SYNCAPI}" -H "Client: ${X_CLIENT}" -X GET $T_SYNCSERVER/api/v1/${a}/ 2>/dev/null >${TDF}.item
 fi
 
 	# extract text
